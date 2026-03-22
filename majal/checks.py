@@ -442,10 +442,218 @@ def check_transliteration_leak(text: str, row: int, field: str) -> list[Issue]:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Normalization checks
+# ---------------------------------------------------------------------------
+
+
+def check_alef_inconsistency(text: str, row: int, field: str) -> list[Issue]:
+    """Detect mixed alef forms (أ إ آ ا) that should be normalized."""
+    forms = {"\u0623", "\u0625", "\u0622"}  # أ إ آ
+    found = [f for f in forms if f in text]
+    bare = "\u0627" in text  # ا
+    if found and bare:
+        return [Issue(
+            check="alef_inconsistency",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message=f"Mixed alef forms: {''.join(found)} and bare alef — consider normalizing",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_ya_inconsistency(text: str, row: int, field: str) -> list[Issue]:
+    """Detect mixed ya/alef-maqsura (ي vs ى) which should be normalized."""
+    has_ya = "\u064A" in text  # ي
+    has_maq = "\u0649" in text  # ى
+    if has_ya and has_maq:
+        return [Issue(
+            check="ya_inconsistency",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message="Mixed ya (ي) and alef maqsura (ى) — consider normalizing",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_ha_ta_marbuta_confusion(text: str, row: int, field: str) -> list[Issue]:
+    """Detect potential ha/ta-marbuta confusion (ه vs ة) — common OCR error."""
+    # Words ending in ه that commonly should end in ة
+    pattern = re.compile(r"\b\w+ه\b")
+    matches = pattern.findall(text)
+    if not matches:
+        return []
+    # Only flag if there are also ة endings (mixed usage suggests confusion)
+    has_ta = "\u0629" in text  # ة
+    has_trailing_ha = any(w.endswith("\u0647") for w in text.split())
+    if has_ta and has_trailing_ha and len(matches) > 2:
+        return [Issue(
+            check="ha_ta_marbuta",
+            severity=Severity.WARNING,
+            row=row, field=field,
+            message=f"Possible ه/ة confusion — {len(matches)} words end with ه while ة also used",
+            snippet=text[:80],
+        )]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Punctuation & number checks
+# ---------------------------------------------------------------------------
+
+
+def check_mixed_punctuation(text: str, row: int, field: str) -> list[Issue]:
+    """Detect mixed Arabic and Latin punctuation (، vs , and ؟ vs ?)."""
+    ar_punct = set("،؛؟")
+    en_punct = set(",;?")
+    has_ar = any(c in ar_punct for c in text)
+    has_en = any(c in en_punct for c in text)
+    # Only flag if text is primarily Arabic
+    if has_ar and has_en and any("\u0600" <= c <= "\u06FF" for c in text):
+        return [Issue(
+            check="mixed_punctuation",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message="Mixed Arabic (،؟) and Latin (,?) punctuation",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_mixed_numerals(text: str, row: int, field: str) -> list[Issue]:
+    """Detect mixed Arabic-Indic (٠١٢) and Western (012) numerals."""
+    ar_digits = set("٠١٢٣٤٥٦٧٨٩")
+    en_digits = set("0123456789")
+    has_ar = any(c in ar_digits for c in text)
+    has_en = any(c in en_digits for c in text)
+    if has_ar and has_en:
+        return [Issue(
+            check="mixed_numerals",
+            severity=Severity.WARNING,
+            row=row, field=field,
+            message="Mixed Arabic-Indic (٠١٢) and Western (012) numerals",
+            snippet=text[:80],
+        )]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Content quality checks (new)
+# ---------------------------------------------------------------------------
+
+
+def check_repeated_chars(text: str, row: int, field: str) -> list[Issue]:
+    """Detect excessive character repetition (e.g. 'ههههههه' or 'ااااا')."""
+    pattern = re.compile(r"(.)\1{4,}")
+    match = pattern.search(text)
+    if match:
+        return [Issue(
+            check="repeated_chars",
+            severity=Severity.WARNING,
+            row=row, field=field,
+            message=f"Excessive repetition: '{match.group()[:10]}' ({len(match.group())} chars)",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_mostly_punctuation(text: str, row: int, field: str) -> list[Issue]:
+    """Detect text that is mostly punctuation/symbols (>50%)."""
+    if not text.strip():
+        return []
+    letters = sum(1 for c in text if c.isalpha())
+    total = len(text.replace(" ", ""))
+    if total > 0 and letters / total < 0.4:
+        ratio = letters / total
+        return [Issue(
+            check="mostly_punctuation",
+            severity=Severity.WARNING,
+            row=row, field=field,
+            message=f"Text is mostly punctuation/symbols ({ratio:.0%} letters)",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_social_media_noise(text: str, row: int, field: str) -> list[Issue]:
+    """Detect social media artifacts: @mentions, #hashtags, RT, emoji floods."""
+    issues = []
+    mentions = re.findall(r"@\w+", text)
+    hashtags = re.findall(r"#\w+", text)
+    if len(mentions) > 3:
+        issues.append(Issue(
+            check="social_media_noise",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message=f"Many @mentions ({len(mentions)} found)",
+            snippet=text[:80],
+        ))
+    if len(hashtags) > 5:
+        issues.append(Issue(
+            check="social_media_noise",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message=f"Many #hashtags ({len(hashtags)} found)",
+            snippet=text[:80],
+        ))
+    return issues
+
+
+def check_adult_content_markers(text: str, row: int, field: str) -> list[Issue]:
+    """Detect potential adult/inappropriate content markers."""
+    markers = ["xxx", "porn", "sex", "18+", "nsfw"]
+    lower = text.lower()
+    found = [m for m in markers if m in lower]
+    if found:
+        return [Issue(
+            check="adult_content",
+            severity=Severity.ERROR,
+            row=row, field=field,
+            message=f"Potential adult content marker: '{found[0]}'",
+            snippet=text[:80],
+        )]
+    return []
+
+
+def check_json_artifacts(text: str, row: int, field: str) -> list[Issue]:
+    """Detect JSON/code artifacts leaked into text (common in LLM training data)."""
+    patterns = [r'\\n', r'\\t', r'\\"', r"\\u[0-9a-fA-F]{4}", r"\{\"", r"\[\""]
+    for pat in patterns:
+        if re.search(pat, text):
+            return [Issue(
+                check="json_artifacts",
+                severity=Severity.WARNING,
+                row=row, field=field,
+                message=f"JSON/code artifact detected: {pat}",
+                snippet=text[:80],
+            )]
+    return []
+
+
+def check_language_tag_mismatch(text: str, row: int, field: str) -> list[Issue]:
+    """Detect text that is entirely in a non-Arabic script (Farsi, Urdu specific chars)."""
+    # Farsi-specific: پ چ ژ گ (also in Urdu) — if present WITHOUT standard Arabic letters
+    farsi_only = set("پچژگکی")
+    has_farsi = any(c in farsi_only for c in text)
+    # Count standard Arabic vs extended
+    arabic_std = sum(1 for c in text if "\u0621" <= c <= "\u064A")
+    if has_farsi and arabic_std < 5 and len(text) > 20:
+        return [Issue(
+            check="non_arabic_script",
+            severity=Severity.INFO,
+            row=row, field=field,
+            message="Text may be Farsi/Urdu rather than Arabic",
+            snippet=text[:80],
+        )]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-# All simple checks that take (text, row, field) -> list[Issue].
 ALL_CHECKS: list = [
     check_encoding_mixed,
     check_encoding_replacement,
@@ -462,6 +670,18 @@ ALL_CHECKS: list = [
     check_html_tags,
     check_urls,
     check_transliteration_leak,
+    # New checks
+    check_alef_inconsistency,
+    check_ya_inconsistency,
+    check_ha_ta_marbuta_confusion,
+    check_mixed_punctuation,
+    check_mixed_numerals,
+    check_repeated_chars,
+    check_mostly_punctuation,
+    check_social_media_noise,
+    check_adult_content_markers,
+    check_json_artifacts,
+    check_language_tag_mismatch,
 ]
 
 CHECK_DESCRIPTIONS: dict[str, str] = {
@@ -470,7 +690,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "invisible_chars": "Detect bidi overrides and zero-width characters (allows LRM/RLM)",
     "empty_or_whitespace": "Detect empty or whitespace-only fields",
     "too_short": "Detect text shorter than 3 characters",
-    "too_long": "Detect text longer than 10 000 characters",
+    "too_long": "Detect text longer than 10,000 characters",
     "duplicated_text": "Detect exact duplicate rows",
     "no_arabic": "Detect text with zero Arabic characters",
     "low_arabic_ratio": "Detect text where less than 30% of letters are Arabic",
@@ -480,4 +700,15 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "html_tags": "Detect HTML tags in text",
     "urls": "Detect URLs in text",
     "transliteration_leak": "Detect Arabic written in Latin transliteration",
+    "alef_inconsistency": "Detect mixed alef forms (أ إ آ ا) needing normalization",
+    "ya_inconsistency": "Detect mixed ya (ي) and alef maqsura (ى)",
+    "ha_ta_marbuta": "Detect ه/ة confusion (common OCR error)",
+    "mixed_punctuation": "Detect mixed Arabic (،؟) and Latin (,?) punctuation",
+    "mixed_numerals": "Detect mixed Arabic-Indic (٠١٢) and Western (012) numerals",
+    "repeated_chars": "Detect excessive character repetition (ههههه)",
+    "mostly_punctuation": "Detect text that is mostly punctuation/symbols",
+    "social_media_noise": "Detect @mentions, #hashtags floods",
+    "adult_content": "Detect potential adult/inappropriate content markers",
+    "json_artifacts": "Detect JSON/code artifacts leaked into text",
+    "non_arabic_script": "Detect text that may be Farsi/Urdu rather than Arabic",
 }
